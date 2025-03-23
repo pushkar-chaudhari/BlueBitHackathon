@@ -1,0 +1,52 @@
+1. It can be difficult to effectively manage shared expenses, particularly when travelling with friends, family, or in a hostel. By creating an intuitive expense-splitting application, our project seeks to streamline this procedure. Users can easily create groups, add expenses, and track dues with the platform's user-friendly interface.
+
+2. Utilised Technologies
+The following technologies are used in the construction of our project:
+
+Frontend: HTML and CSS for creating an interface that is both interactive and easy to use.
+
+Backend: Python Flask for managing data, processing expenses, and authenticating users.
+
+Deployment: Render for backend service hosting.
+
+Development Environment: Replit platform for code writing, testing, and execution.
+
+3. Functionality and Features
+The following features are offered by the expense-splitting application:
+Interface for Users
+
+Replit powers the application, giving users a seamless and convenient platform.
+
+After being greeted by an easy-to-use interface, users can click the "Get Started" button to start using the application.
+
+4.   Verification of Users
+
+Users are taken to the login page after selecting "Get Started."
+
+Users only need to enter their Gmail address and password to log in.
+
+If they are a new user, they can choose to register by entering their information.
+
+5.   Establishing and Managing Groups
+
+Users can create a group and define its purpose after successfully logging in.
+
+In order to manage shared expenses, users can add members to the group.
+
+6.  Expense Management
+
+Users can add an expense within a group.
+
+The added expense can be split equally among all members or customized based on individual contributions.
+
+The system keeps track of all expenses and calculates each participant’s share.
+
+7. Due Tracking and Payment
+
+Each participant can check the app to see if they have any outstanding dues.
+
+Users can pay their dues directly and mark them as settled.
+
+The application provides an option to check dues and confirm payments to ensure transparency and accountability.
+
+!! WE HAVE USED AI IN THE CODE
