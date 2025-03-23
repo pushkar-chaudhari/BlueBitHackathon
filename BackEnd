@@ -1,1 +1,103 @@
+-> BACKEND FOR SETUP AND IMPORTS USING FLASK
+
+from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for
+from datetime import datetime
+from werkzeug.security import generate_password_hash, check_password_hash
+
+app = Flask(__name__)
+app.secret_key = 'your-secret-key-here'  # Required for session management
+
+users_db = {}
+
+-> USER DETAILS :- 
+
+class User:
+    def __init__(self, user_id, name, email, mobile):
+        self.user_id = user_id
+        self.name = name
+        self.email = email
+        self.mobile = mobile
+        self.balance = 0
+
+    def update_balance(self, amount):
+        self.balance += amount
+
+    def get_balance(self):
+        return round(self.balance, 2)
+
+-> EXPENSE TRACKING :-
+
+class Expense:
+    def __init__(self, expense_id, payer_id, amount, participants, split_type, expense_name=None, notes=None, images=None):
+        self.expense_id = expense_id
+        self.payer_id = payer_id
+        self.amount = amount
+        self.participants = participants
+        self.split_type = split_type
+        self.expense_name = expense_name
+        self.notes = notes
+        self.images = images
+
+class ExpenseManager:
+    def __init__(self):
+        self.users = {}
+        self.expenses = []
+
+    def add_user(self, user_id, name, email, mobile):
+        if user_id not in self.users:
+            self.users[user_id] = User(user_id, name, email, mobile)
+
+    def record_expense(self, payer_id, amount, participants, split_type, expense_name=None, notes=None, images=None):
+        expense_id = len(self.expenses) + 1
+        expense = Expense(expense_id, payer_id, amount, participants, split_type, expense_name, notes, images)
+        self.expenses.append(expense)
+
+        payer = self.users.get(payer_id)
+        if not payer:
+            raise ValueError(f'User  {payer_id} does not exist.')
+
+        total_participants = len(participants)
+
+        if split_type == "EQUALLY":
+            each_share = amount / total_participants
+            for participant_id in participants:
+                participant = self.users.get(participant_id)
+                if participant:
+                    participant.update_balance(-each_share)
+                    payer.update_balance(each_share)
+                else:
+                    raise ValueError(f'User  {participant_id} does not exist.')
+
+    def get_user(self, user_id):
+        user = self.users.get(user_id)
+        if user:
+            return user
+        else:
+            raise ValueError(f'User  {user_id} does not exist.')
+
+    def get_user_balance(self, user_id):
+        user = self.users.get(user_id)
+        if user:
+            return user.get_balance()
+        else:
+            raise ValueError(f'User  {user_id} does not exist.')
+
+    def get_passbook(self, user_id):
+        passbook = []
+        for expense in self.expenses:
+            if user_id == expense.payer_id or user_id in expense.participants:
+                passbook.append({
+                    "expense_id": expense.expense_id,
+                    "expense_name": expense.expense_name,
+                    "payer_id": expense.payer_id,
+                    "amount": expense.amount,
+                    "participants": expense.participants,
+                    "split_type": expense.split_type,
+                    "notes": expense.notes,
+                    "images": expense.images
+                })
+        return passbook
+
+-> INITIALIZATION :-
+expenseManager = ExpenseManager()
 
