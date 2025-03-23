@@ -1,0 +1,117 @@
+1.  CODE FOR GROUP EXPENSE TEMPLATE
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{ group_name }} - Expenses</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+</head>
+<body>
+    <div class="container mt-4">
+        <h2>{{ group_name }}</h2>
+        <div class="card mb-4">
+            <div class="card-header">
+                <h4>Members</h4>
+            </div>
+            <div class="card-body">
+                <ul class="list-group">
+                {% for member in members %}
+                    <li class="list-group-item">{{ member }}</li>
+                {% endfor %}
+                </ul>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h4>Expenses</h4>
+            </div>
+            <div class="card-body">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Description</th>
+                            <th>Amount</th>
+                            <th>Paid By</th>
+                            <th>Date</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for expense in expenses %}
+                        <tr>
+                            <td>{{ expense.description }}</td>
+                            <td>₹{{ expense.amount }}</td>
+                            <td>{{ expense.paid_by }}</td>
+                            <td>{{ expense.timestamp.strftime('%Y-%m-%d') }}</td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <a href="/add_expense" class="btn btn-primary mt-3">Add New Expense</a>
+        <a href="/view_groups" class="btn btn-secondary mt-3">Back to Groups</a>
+    </div>
+</body>
+</html>
+"""
+
+
+
+2. CODE FOR GROUP EXPENSE TEMPLATE NEW
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{ group_name }} - Expenses</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+</head>
+<body>
+    <div class="container mt-4">
+        <h2>{{ group_name }}</h2>
+        <div class="card mb-4">
+            <div class="card-header">
+                <h4>Members</h4>
+            </div>
+            <div class="card-body">
+                <ul class="list-group">
+                {% for member in members %}
+                    <li class="list-group-item">{{ member }}</li>
+                {% endfor %}
+                </ul>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h4>Expenses</h4>
+            </div>
+            <div class="card-body">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Description</th>
+                            <th>Amount</th>
+                            <th>Paid By</th>
+                            <th>Date</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for expense in expenses %}
+                        <tr>
+                            <td>{{ expense.description }}</td>
+                            <td>₹{{ expense.amount }}</td>
+                            <td>{{ expense.paid_by }}</td>
+                            <td>{{ expense.timestamp.strftime('%Y-%m-%d') }}</td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <a href="/add_expense" class="btn btn-primary mt-3">Add New Expense</a>
+        <a href="/view_groups" class="btn btn-secondary mt-3">Back to Groups</a>
+    </div>
+</body>
+</html>
+"""
