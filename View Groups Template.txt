@@ -1,0 +1,38 @@
+view_groups_template = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <title>View Groups</title>
+</head>
+<body>
+    <div class="container mt-4">
+        <a href="/dashboard" class="btn btn-secondary mb-3"><i class="fas fa-arrow-left"></i> Back to Dashboard</a>
+        <h2 class="text-center">Your Groups</h2>
+        <div class="row">
+            {% for group_name, members in user_groups.items() %}
+                <div class="col-md-6 mb-4">
+                    <div class="card shadow">
+                        <div class="card-header">
+                            <h3>{{ group_name }}</h3>
+                        </div>
+                        <div class="card-body">
+                            <h5>Members:</h5>
+                            <ul class="list-group mb-3">
+                                {% for member in members %}
+                                    <li class="list-group-item">{{ member }}</li>
+                                {% endfor %}
+                            </ul>
+                            <a href="/group/{{ group_name }}" class="btn btn-primary">View Expenses</a>
+                        </div>
+                    </div>
+                </div>
+            {% endfor %}
+        </div>
+        <a href="/create_group" class="btn btn-success mt-3">Create New Group</a>
+    </div>
+</body>
+</html>
+"""

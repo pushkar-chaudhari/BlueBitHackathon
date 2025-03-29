@@ -1,0 +1,98 @@
+login_template = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <title>Login</title>
+</head>
+<body>
+    <div class="d-flex justify-content-center align-items-center vh-100">
+        <div class="card p-4 text-center shadow-lg" style="max-width: 400px; width: 100%;">
+            <h2 class="mb-3">Login</h2>
+            <form method="POST" action="/login" class="w-100">
+                <div class="mb-3">
+                    <label class="form-label">Username</label>
+                    <input type="text" name="username" class="form-control" placeholder="Enter username" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Password</label>
+                    <input type="password" name="password" class="form-control" placeholder="Enter password" required>
+                </div>
+                <button type="submit" class="btn btn-primary w-100">Login</button>
+                <div class="mt-3 text-center">
+                    <h6>Don't have an account?</h6>
+                    <a href="/register" class="btn btn-sm btn-secondary">Register</a>
+                </div>
+            </form>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+registration_template = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <title>Register</title>
+    <style>
+        body {
+            background-color: #f8f9fa;
+        }
+        .card {
+            border-radius: 15px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.1);
+        }
+        .form-control {
+            border-radius: 10px;
+            padding: 0.8rem;
+        }
+        .btn {
+            border-radius: 10px;
+            padding: 0.8rem;
+        }
+        .form-text {
+            color: #6c757d;
+            font-size: 0.85rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="d-flex justify-content-center align-items-center vh-100">
+        <div class="card p-4 text-center shadow-lg" style="max-width: 400px; width: 100%;">
+            <h2 class="mb-4"><i class="fas fa-user-plus"></i> Register</h2>
+            <form method="POST" action="/register" class="w-100">
+                <div class="mb-3">
+                    <label class="form-label">Username</label>
+                    <input type="text" name="username" class="form-control" placeholder="Enter username" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Email</label>
+                    <input type="email" name="email" class="form-control" placeholder="Enter email" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Password</label>
+                    <input type="password" name="password" class="form-control" placeholder="Enter password" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">UPI ID</label>
+                    <input type="text" name="upi_id" class="form-control" placeholder="e.g., username@bank" required>
+                    <div class="form-text">This UPI ID will be used to receive payments from others</div>
+                </div>
+                <button type="submit" class="btn btn-primary w-100 mb-3">Register</button>
+                <div class="text-center">
+                    <h6>Already have an account?</h6>
+                    <a href="/login" class="btn btn-sm btn-secondary">Login</a>
+                </div>
+            </form>
+        </div>
+    </div>
+</body>
+</html>
+"""

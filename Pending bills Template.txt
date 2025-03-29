@@ -1,0 +1,84 @@
+pending_bills_template = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <title>Pending Bills</title>
+</head>
+<body>
+    <div class="container mt-4">
+        <a href="/dashboard" class="btn btn-secondary mb-3"><i class="fas fa-arrow-left"></i> Back to Dashboard</a>
+        <h2 class="text-center">Pending Bills</h2>
+        <form method="POST" action="/update_bills">
+            <table class="table table-hover table-bordered">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Group</th>
+                        <th>Amount Due</th>
+                        <th>Paid By</th>
+                        <th>Owed By</th>
+                        <th>Status</th>
+                        {% if bills|selectattr('paid_by', 'equalto', session['username'])|list %}
+                        <th>Mark as Paid</th>
+                        {% endif %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for bill in bills %}
+                        <tr>
+                            <td>{{ bill.id }}</td>
+                            <td>{{ bill.group_name }}</td>
+                            <td>
+                                {{ format_amount(bill.amount_due, bill.currency) }}
+                                {% if bill.currency != 'INR' %}
+                                    ({{ format_amount(bill.amount_inr, 'INR') }})
+                                {% endif %}
+                            </td>
+                            <td>{{ bill.paid_by }}</td>
+                            <td>{{ bill.owed_by }}</td>
+                            <td>{{ 'Paid' if bill.is_paid else 'Pending' }}</td>
+                            {% if bill.paid_by == session['username'] and not bill.is_paid %}
+                            <td class="text-center">
+                                <input type="checkbox" name="paid_bills" value="{{ bill.id }}" class="form-check-input mx-auto">
+                            </td>
+                            {% elif bill.paid_by == session['username'] %}
+                            <td class="text-center">✓</td>
+                            {% endif %}
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% if bills|selectattr('paid_by', 'equalto', session['username'])|list %}
+            <button type="submit" class="btn btn-primary">Update Paid Status</button>
+            {% endif %}
+        </form>
+
+        <div class="mt-4">
+            <h3>Pay Using:</h3>
+            {% for bill in bills %}
+                {% if not bill.is_paid and bill.owed_by == session['username'] %}
+                    <div class="card mb-3">
+                        <div class="card-body">
+                            <h5>Bill #{{ bill.id }} - {{ format_amount(bill.amount_due, bill.currency) }}
+                                {% if bill.currency != 'INR' %}
+                                    ({{ format_amount(bill.amount_inr, 'INR') }})
+                                {% endif %}
+                            </h5>
+                            <div class="btn-group">
+                                <a href="/pay/{{ bill.id }}/upi" class="btn btn-success">
+                                    <i class="fas fa-mobile-alt"></i> Pay with UPI
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                {% endif %}
+            {% endfor %}
+        </div>
+    </div>
+</body>
+</html>
+"""

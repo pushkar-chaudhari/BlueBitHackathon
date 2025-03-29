@@ -1,0 +1,64 @@
+group_expenses_template = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{ group_name }} - Expenses</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+</head>
+<body>
+    <div class="container mt-4">
+        <h2>{{ group_name }}</h2>
+        <div class="card mb-4">
+            <div class="card-header">
+                <h4>Members</h4>
+            </div>
+            <div class="card-body">
+                <ul class="list-group">
+                {% for member in members %}
+                    <li class="list-group-item">{{ member }}</li>
+                {% endfor %}
+                </ul>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h4>Expenses</h4>
+            </div>
+            <div class="card-body">
+                <table class="table table-bordered">
+                    <thead>
+                        <tr>
+                            <th>Description</th>
+                            <th>Amount</th>
+                            <th>Paid By</th>
+                            <th>Category</th>
+                            <th>Date</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for expense in expenses %}
+                        <tr>
+                            <td>{{ expense.description }}</td>
+                            <td>
+                                {{ format_amount(expense.amount, expense.currency) }}
+                                {% if expense.currency != 'INR' %}
+                                    ({{ format_amount(expense.amount_inr, 'INR') }})
+                                {% endif %}
+                            </td>
+                            <td>{{ expense.paid_by }}</td>
+                            <td><span class="badge badge-info">{{ expense.category }}</span></td>
+                            <td>{{ expense.timestamp.strftime('%Y-%m-%d') }}</td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <a href="/add_expense" class="btn btn-primary mt-3">Add New Expense</a>
+        <a href="/view_groups" class="btn btn-secondary mt-3">Back to Groups</a>
+    </div>
+</body>
+</html>
+"""
