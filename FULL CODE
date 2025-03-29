@@ -1,0 +1,2055 @@
+import qrcode
+import base64
+from io import BytesIO
+import urllib.parse
+
+import os
+import magic
+import io
+import re
+import pytesseract
+from PIL import Image
+from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for
+from datetime import datetime
+from werkzeug.security import generate_password_hash, check_password_hash
+import requests
+import qrcode
+import base64
+from io import BytesIO
+import urllib.parse
+import pdf2image
+
+app = Flask(__name__, static_url_path='/static', static_folder='static')
+app.secret_key = 'your-secret-key-here'  # Required for session management
+
+# Replace with your UPI ID
+UPI_ID = "9527044426@ibl"
+
+@app.template_filter('format_amount')
+def format_amount_filter(amount, currency):
+    if currency == 'INR':
+        return f'₹{amount:.2f}'
+    elif currency == 'USD':
+        return f'${amount:.2f}'
+    elif currency == 'EUR':
+        return f'€{amount:.2f}'
+    elif currency == 'GBP':
+        return f'£{amount:.2f}'
+    elif currency == 'JPY':
+        return f'¥{amount:.2f}'
+    else:
+        return f'{amount:.2f}'
+
+# Simple in-memory user storage
+users_db = {}
+
+# Model
+class User:
+    def __init__(self, user_id, name, email, mobile):
+        self.user_id = user_id
+        self.name = name
+        self.email = email
+        self.mobile = mobile
+        self.balance = 0
+
+    def update_balance(self, amount):
+        self.balance += amount
+
+    def get_balance(self):
+        return round(self.balance, 2)
+
+def suggest_category(description):
+    # Simple keyword-based categorization
+    categories = {
+        'Food': ['food', 'lunch', 'dinner', 'breakfast', 'restaurant', 'cafe', 'grocery', 'Pizza', 'Burger', 'Sandwich', 'Pasta', 'Salad', 'Soup', 'Sushi', 'Ramen', 'Curry', 'Fried', 'Chicken', 'Biryani', 'Noodles', 'Pakora', 'Pulao', 'Panner'],
+        'transport': ['uber', 'taxi', 'fuel', 'gas', 'train', 'bus', 'metro'],
+        'utilities': ['electricity', 'water', 'internet', 'wifi', 'phone', 'bill'],
+        'entertainment': ['movie', 'concert', 'game', 'party', 'ticket'],
+        'shopping': ['amazon', 'shopping', 'clothes', 'shoes', 'electronics'],
+        'rent': ['rent', 'house', 'apartment', 'flat'],
+        'Education': ['school', 'college', 'university', 'degree', 'study', 'project', 'Internship'],
+        'Sports': ['sports', 'fitness', 'gym', 'exercise', 'health', 'fitness'],
+        'Health': ['health', 'medicine', 'disease', 'doctor', 'prescription', 'medicine'],
+        'work': ['work', 'job', 'career', 'contract', 'freelancer'],
+        'others': []
+    }
+
+    description = description.lower()
+    for category, keywords in categories.items():
+        if any(keyword in description for keyword in keywords):
+            return category
+    return 'others'
+
+# Exchange rate API
+def get_exchange_rate(from_currency, to_currency='INR'):
+    try:
+        response = requests.get(f'https://open.er-api.com/v6/latest/{from_currency}')
+        rates = response.json()['rates']
+        return rates[to_currency]
+    except:
+        return 1.0  # Fallback to 1:1 rate if API fails
+
+class Expense:
+    def __init__(self, expense_id, payer_id, amount, participants, split_type, currency='INR', expense_name=None, notes=None, images=None):
+        self.expense_id = expense_id
+        self.payer_id = payer_id
+        self.amount = amount
+        self.currency = currency
+        self.amount_inr = amount * get_exchange_rate(currency)  # Store amount in INR for consistency
+        self.participants = participants
+        self.split_type = split_type
+        self.expense_name = expense_name
+        self.notes = notes
+        self.images = images
+        self.category = suggest_category(expense_name or '')
+
+class ExpenseManager:
+    def __init__(self):
+        self.users = {}
+        self.expenses = []
+
+    def add_user(self, user_id, name, email, mobile):
+        if user_id not in self.users:
+            self.users[user_id] = User(user_id, name, email, mobile)
+
+    def record_expense(self, payer_id, amount, participants, split_type, expense_name=None, notes=None, images=None):
+        expense_id = len(self.expenses) + 1
+        expense = Expense(expense_id, payer_id, amount, participants, split_type, expense_name, notes, images)
+        self.expenses.append(expense)
+
+        payer = self.users.get(payer_id)
+        if not payer:
+            raise ValueError(f'User  {payer_id} does not exist.')
+
+        total_participants = len(participants)
+
+        if split_type == "EQUALLY":
+            each_share = amount / total_participants
+            for participant_id in participants:
+                participant = self.users.get(participant_id)
+                if participant:
+                    participant.update_balance(-each_share)
+                    payer.update_balance(each_share)
+                else:
+                    raise ValueError(f'User  {participant_id} does not exist.')
+
+    def get_user(self, user_id):
+        user = self.users.get(user_id)
+        if user:
+            return user
+        else:
+            raise ValueError(f'User  {user_id} does not exist.')
+
+    def get_user_balance(self, user_id):
+        user = self.users.get(user_id)
+        if user:
+            return user.get_balance()
+        else:
+            raise ValueError(f'User  {user_id} does not exist.')
+
+    def get_passbook(self, user_id):
+        passbook = []
+        for expense in self.expenses:
+            if user_id == expense.payer_id or user_id in expense.participants:
+                passbook.append({
+                    "expense_id": expense.expense_id,
+                    "expense_name": expense.expense_name,
+                    "payer_id": expense.payer_id,
+                    "amount": expense.amount,
+                    "participants": expense.participants,
+                    "split_type": expense.split_type,
+                    "notes": expense.notes,
+                    "images": expense.images
+                })
+        return passbook
+
+    def simplify_debts(self, debts):
+        """
+        Simplifies the debt graph by resolving cyclic debts.
+        Input: List of debts where each debt is (debtor, creditor, amount)
+        Output: Simplified list of debts
+        """
+        # Create a balance sheet
+        balances = {}
+        for debtor, creditor, amount in debts:
+            balances[debtor] = balances.get(debtor, 0) - amount
+            balances[creditor] = balances.get(creditor, 0) + amount
+
+        # Create new optimized transactions
+        users = list(balances.keys())
+        users.sort(key=lambda x: balances[x])  # Sort by balance
+
+        optimized_debts = []
+        i, j = 0, len(users) - 1
+
+        while i < j:
+            debtor = users[i]
+            creditor = users[j]
+
+            if abs(balances[debtor]) < abs(balances[creditor]):
+                amount = abs(balances[debtor])
+                optimized_debts.append((debtor, creditor, amount))
+                balances[creditor] += balances[debtor]
+                balances[debtor] = 0
+                i += 1
+            else:
+                amount = abs(balances[creditor])
+                optimized_debts.append((debtor, creditor, amount))
+                balances[debtor] += balances[creditor]
+                balances[creditor] = 0
+                j -= 1
+
+        return optimized_debts
+
+
+# Initialize ExpenseManager
+expenseManager = ExpenseManager()
+
+# HTML Templates
+welcome_template = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        :root {
+            --primary: #e74c3c;
+            --secondary: #2c3e50;
+            --accent: #f1c40f;
+            --text-light: #ecf0f1;
+            --text-dark: #2c3e50;
+            --background-dark: #34495e;
+        }
+
+        body {
+            font-family: 'Poppins', sans-serif;
+            background-color: var(--background-dark);
+            color: var(--text-light);
+        }
+
+        .hero {
+            background: linear-gradient(45deg, var(--primary), var(--secondary), var(--accent));
+            background-size: 200% 200%;
+            animation: gradientBG 10s ease infinite;
+            color: var(--text-light);
+            padding: 120px 0;
+            position: relative;
+            box-shadow: 0 15px 30px rgba(0,0,0,0.15);
+        }
+
+        @keyframes gradientBG {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+
+        .hero h1 {
+            font-weight: 800;
+            letter-spacing: -0.5px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+            margin-bottom: 1.5rem;
+            font-size: 3.5rem;
+            background: linear-gradient(to right, var(--accent), var(--text-light));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            animation: titleGlow 2s ease-in-out infinite;
+        }
+
+        @keyframes titleGlow {
+            0%, 100% { text-shadow: 0 0 20px rgba(255, 230, 109, 0.5); }
+            50% { text-shadow: 0 0 30px rgba(255, 230, 109, 0.8); }
+        }
+
+        .hero p {
+            font-size: 1.5rem;
+            line-height: 1.6;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.1);
+            max-width: 800px;
+            margin: 0 auto;
+            color: rgba(255, 255, 255, 0.95);
+        }
+
+        .feature-card {
+            transition: all 0.4s cubic-bezier(0.165, 0.84, 0.44, 1);
+            border: none;
+            border-radius: 20px;
+            background: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(10px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            overflow: hidden;
+            padding: 2rem;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-10px) scale(1.02);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.15);
+        }
+
+        .feature-icon {
+            font-size: 2.8rem;
+            margin-bottom: 25px;
+            background: linear-gradient(135deg, var(--primary), var(--accent));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: inline-block;
+        }
+
+        h3 {
+            color: var(--primary);
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
+
+        .text-muted {
+            color: #64748b !important;
+        }
+
+        .btn {
+            border-radius: 12px;
+            padding: 0.75rem 1.5rem;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.15);
+        }
+    </style>
+    <title>Welcome to Bill Splitter</title>
+</head>
+<body>
+    <div class="hero">
+        <div class="container text-center">
+            <h1 class="display-3 fw-bold mb-4">Bill Splitter</h1>
+            <p class="lead fs-4 mb-5">
+                💰 Transform your group expenses into hassle-free experiences! Split bills instantly,
+                track every payment effortlessly, and keep your friendships strong with crystal-clear
+                financial management. Say goodbye to awkward money talks! ✨
+            </p>
+            <a class="btn btn-light btn-lg px-5 py-3" href="/login">
+                <i class="fas fa-sign-in-alt me-2"></i>Get Started
+            </a>
+        </div>
+    </div>
+
+    <div class="container py-5">
+        <div class="row g-4">
+            <div class="col-md-3">
+                <div class="card feature-card h-100 p-4 text-center">
+                    <div class="feature-icon">
+                        <i class="fas fa-calculator"></i>
+                    </div>
+                    <h3>Easy Splitting</h3>
+                    <p class="text-muted">Split bills equally or by custom percentages instantly.</p>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card feature-card h-100 p-4 text-center">
+                    <div class="feature-icon">
+                        <i class="fas fa-users"></i>
+                    </div>
+                    <h3>Group Management</h3>
+                    <p class="text-muted">Create and manage multiple groups effortlessly.</p>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card feature-card h-100 p-4 text-center">
+                    <div class="feature-icon">
+                        <i class="fas fa-globe"></i>
+                    </div>
+                    <h3>Multi Currency</h3>
+                    <p class="text-muted">Support for USD, EUR, GBP, JPY and more with automatic conversion.</p>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card feature-card h-100 p-4 text-center">
+                    <div class="feature-icon">
+                        <i class="fas fa-history"></i>
+                    </div>
+                    <h3>Track History</h3>
+                    <p class="text-muted">Keep track of all expenses with detailed history.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+"""
+
+login_template = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <title>Login</title>
+</head>
+<body>
+    <div class="d-flex justify-content-center align-items-center vh-100">
+        <div class="card p-4 text-center shadow-lg" style="max-width: 400px; width: 100%;">
+            <h2 class="mb-3">Login</h2>
+            <form method="POST" action="/login" class="w-100">
+                <div class="mb-3">
+                    <label class="form-label">Username</label>
+                    <input type="text" name="username" class="form-control" placeholder="Enter username" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Password</label>
+                    <input type="password" name="password" class="form-control" placeholder="Enter password" required>
+                </div>
+                <button type="submit" class="btn btn-primary w-100">Login</button>
+                <div class="mt-3 text-center">
+                    <h6>Don't have an account?</h6>
+                    <a href="/register" class="btn btn-sm btn-secondary">Register</a>
+                </div>
+            </form>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+registration_template = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <title>Register</title>
+    <style>
+        body {
+            background-color: #f8f9fa;
+        }
+        .card {
+            border-radius: 15px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.1);
+        }
+        .form-control {
+            border-radius: 10px;
+            padding: 0.8rem;
+        }
+        .btn {
+            border-radius: 10px;
+            padding: 0.8rem;
+        }
+        .form-text {
+            color: #6c757d;
+            font-size: 0.85rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="d-flex justify-content-center align-items-center vh-100">
+        <div class="card p-4 text-center shadow-lg" style="max-width: 400px; width: 100%;">
+            <h2 class="mb-4"><i class="fas fa-user-plus"></i> Register</h2>
+            <form method="POST" action="/register" class="w-100">
+                <div class="mb-3">
+                    <label class="form-label">Username</label>
+                    <input type="text" name="username" class="form-control" placeholder="Enter username" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Email</label>
+                    <input type="email" name="email" class="form-control" placeholder="Enter email" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Password</label>
+                    <input type="password" name="password" class="form-control" placeholder="Enter password" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">UPI ID</label>
+                    <input type="text" name="upi_id" class="form-control" placeholder="e.g., username@bank" required>
+                    <div class="form-text">This UPI ID will be used to receive payments from others</div>
+                </div>
+                <button type="submit" class="btn btn-primary w-100 mb-3">Register</button>
+                <div class="text-center">
+                    <h6>Already have an account?</h6>
+                    <a href="/login" class="btn btn-sm btn-secondary">Login</a>
+                </div>
+            </form>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+dashboard_template = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        :root {
+            --primary-color: #4361ee;
+            --secondary-color: #3f37c9;
+            --accent-color: #4895ef;
+            --bg-color: #f8f9fa;
+            --text-color: #2b2d42;
+            --card-bg: #ffffff;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+        }
+
+        .navbar {
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            padding: 1rem 0;
+            box-shadow: 0 2px 15px rgba(0,0,0,0.1);
+        }
+
+        .navbar-brand {
+            font-weight: 600;
+            font-size: 1.5rem;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: none;
+            border-radius: 15px;
+            transition: all 0.3s cubic-bezier(0.165, 0.84, 0.44, 1);
+            cursor: pointer;
+            overflow: hidden;
+        }
+
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 30px rgba(0,0,0,0.15);
+        }
+
+        .feature-icon {
+            font-size: 2.5rem;
+            margin-bottom: 20px;
+            background: linear-gradient(135deg, var(--primary-color), var(--accent-color));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            transition: transform 0.3s ease;
+        }
+
+        .card:hover .feature-icon {
+            transform: scale(1.1);
+        }
+
+        .card h3 {
+            color: var(--text-color);
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
+
+        .btn {
+            border-radius: 10px;
+            padding: 0.8rem 1.5rem;
+            font-weight: 500;
+            text-transform: none;
+            letter-spacing: 0.5px;
+            transition: all 0.3s ease;
+        }
+
+        .btn-primary {
+            background: var(--primary-color);
+            border: none;
+        }
+
+        .btn-primary:hover {
+            background: var(--secondary-color);
+            transform: translateY(-2px);
+        }
+
+        .text-muted {
+            color: #6c757d !important;
+        }
+
+        .container {
+            padding: 2rem 1rem;
+        }
+
+        .profile-btn {
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2);
+            backdrop-filter: blur(5px);
+        }
+
+        .profile-btn:hover {
+            background: rgba(255,255,255,0.2);
+            border-color: rgba(255,255,255,0.3);
+        }
+    </style>
+    <title>Dashboard</title>
+</head>
+<body class="bg-light">
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary mb-4">
+        <div class="container">
+            <a class="navbar-brand" href="#"><i class="fas fa-wallet me-2"></i>Bill Splitter</a>
+            <div class="ms-auto">
+                <a href="/profile" class="btn btn-outline-light">
+                    <i class="fas fa-user me-2"></i>Profile
+                </a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container">
+        <div class="row mb-4">
+            <div class="col-md-4 mb-3">
+                <div class="card h-100 text-center p-4">
+                    <div class="feature-icon">
+                        <i class="fas fa-plus-circle"></i>
+                    </div>
+                    <h3>Add Expense</h3>
+                    <p class="text-muted">Record a new expense to split with your group</p>
+                    <a href="/add_expense" class="btn btn-primary mt-auto">
+                        <i class="fas fa-plus me-2"></i>New Expense
+                    </a>
+                </div>
+            </div>
+            <div class="col-md-4 mb-3">
+                <div class="card h-100 text-center p-4">
+                    <div class="feature-icon">
+                        <i class="fas fa-users"></i>
+                    </div>
+                    <h3>Groups</h3>
+                    <p class="text-muted">Manage your expense groups</p>
+                    <div class="mt-auto">
+                        <a href="/create_group" class="btn btn-success mb-2 w-100">
+                            <i class="fas fa-plus me-2"></i>Create Group
+                        </a>
+                        <a href="/view_groups" class="btn btn-info w-100">
+                            <i class="fas fa-list me-2"></i>View Groups
+                        </a>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4 mb-3">
+                <div class="card h-100 text-center p-4">
+                    <div class="feature-icon">
+                        <i class="fas fa-file-invoice"></i>
+                    </div>
+                    <h3>Bills & History</h3>
+                    <p class="text-muted">Track your bills and past expenses</p>
+                    <div class="mt-auto">
+                        <a href="/pending_bills" class="btn btn-warning mb-2 w-100">
+                            <i class="fas fa-clock me-2"></i>Pending Bills
+                        </a>
+                        <a href="/past_expenses" class="btn btn-secondary w-100">
+                            <i class="fas fa-history me-2"></i>Past Expenses
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+"""
+
+add_expense_template = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <title>Add Expense</title>
+    <style>
+        .conversion-info {
+            font-size: 0.9em;
+            color: #666;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-4">
+        <a href="/dashboard" class="btn btn-secondary mb-3"><i class="fas fa-arrow-left"></i> Back to Dashboard</a>
+        <div class="card p-4 text-center shadow-lg mx-auto" style="max-width: 600px;">
+            <h2 class="mb-3">Add Expense</h2>
+            <form method="POST" action="/add_expense" class="w-100" id="expenseForm">
+                <div class="mb-3">
+                    <label class="form-label">Amount</label>
+                    <div class="input-group">
+                        <input type="number" name="amount" id="amount" class="form-control" placeholder="Enter amount" required step="0.01" oninput="updateConversion()">
+                        <select name="currency" id="currency" class="form-control" style="max-width: 120px;" onchange="updateConversion()">
+                            <option value="INR">INR (₹)</option>
+                            <option value="USD">USD ($)</option>
+                            <option value="EUR">EUR (€)</option>
+                            <option value="GBP">GBP (£)</option>
+                            <option value="JPY">JPY (¥)</option>
+                        </select>
+                    </div>
+                    <div id="conversionInfo" class="conversion-info"></div>
+                    <script>
+                    async function updateConversion() {
+                        const amount = document.getElementById('amount').value;
+                        const currency = document.getElementById('currency').value;
+                        if (amount && currency !== 'INR') {
+                            try {
+                                const response = await fetch(`/convert_currency/${currency}/INR/${amount}`);
+                                const data = await response.json();
+                                if (data.result) {
+                                    document.getElementById('conversionInfo').innerHTML =
+                                        `${amount} ${currency} = ₹${data.result.toFixed(2)} INR (Rate: 1 ${currency} = ₹${data.rate.toFixed(4)})`;
+                                }
+                            } catch (error) {
+                                console.error('Error:', error);
+                            }
+                        } else {
+                            document.getElementById('conversionInfo').innerHTML = '';
+                        }
+                    }
+                    </script>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Select Group</label>
+                    <select name="group_name" class="form-control" id="groupSelect">
+                        {% for group_name, members in groups.items() %}
+                            {% if username in members %}
+                                <option value="{{ group_name }}" data-members='{{ members|tojson|safe }}'>{{ group_name }}</option>
+                            {% endif %}
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Upload Receipt</label>
+                    <div class="input-group">
+                        <input type="file" class="form-control" id="receiptUpload" accept="image/*,.pdf" capture="camera">
+                        <button type="button" class="btn btn-info" onclick="scanReceipt()">Scan Receipt</button>
+                    </div>
+                    <div id="scanResults" class="mt-2"></div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Description</label>
+                    <input type="text" name="description" id="description" class="form-control" placeholder="Enter description" required>
+                </div>
+                <script>
+                    async function scanReceipt() {
+                        const fileInput = document.getElementById('receiptUpload');
+                        const resultsDiv = document.getElementById('scanResults');
+                        const amountInput = document.getElementById('amount');
+                        const descriptionInput = document.getElementById('description');
+
+                        if (!fileInput.files.length) {
+                            alert('Please select a receipt image first');
+                            return;
+                        }
+
+                        const formData = new FormData();
+                        formData.append('receipt', fileInput.files[0]);
+
+                        resultsDiv.innerHTML = '<div class="alert alert-info">Scanning receipt...</div>';
+
+                        try {
+                            const response = await fetch('/scan_receipt', {
+                                method: 'POST',
+                                body: formData
+                            });
+
+                            const data = await response.json();
+
+                            if (response.ok) {
+                                const validationClass = data.validation.valid ? 'alert-success' : 'alert-warning';
+                                const validationStatus = data.validation.valid ? 'Valid Receipt' : 'Invalid Receipt';
+                                resultsDiv.innerHTML = `
+                                    <div class="alert ${validationClass}">
+                                        <p><strong>Merchant:</strong> ${data.merchant || 'Not found'}</p>
+                                        <p><strong>Amount:</strong> ${data.amount || 'Not found'}</p>
+                                        <p><strong>Status:</strong> ${validationStatus}</p>
+                                        <p><strong>Confidence Score:</strong> ${data.validation.confidence_score.toFixed(1)}%</p>
+                                    </div>`;
+
+                                if (data.amount) {
+                                    amountInput.value = data.amount;
+                                }
+                                if (data.merchant) {
+                                    descriptionInput.value = data.merchant;
+                                }
+                            } else {
+                                resultsDiv.innerHTML = `<div class="alert alert-danger">Error: ${data.error}</div>`;
+                            }
+                        } catch (error) {
+                            resultsDiv.innerHTML = `<div class="alert alert-danger">Error scanning receipt: ${error.message}</div>`;
+                        }
+                    }
+                </script>
+                <div class="mb-3">
+                    <label class="form-label">Split Type</label>
+                    <select name="split_type" class="form-control" id="splitType">
+                        <option value="EQUALLY">Equally</option>
+                        <option value="PERCENTAGE">Percentage</option>
+                        <option value="SHARE">Share</option>
+                    </select>
+                    <small class="form-text text-muted">Select "Percentage" to enter custom percentages for each member</small>
+                </div>
+                <div id="percentageInputs" style="display: none;">
+                    <h5 class="mb-3">Percentage Split</h5>
+                    <div id="memberPercentages"></div>
+                    <div class="text-danger" id="percentageError"></div>
+                </div>
+                <button type="submit" class="btn btn-primary w-100 mt-3">Add Expense</button>
+            </form>
+        </div>
+    </div>
+    <script>
+        const splitType = document.getElementById('splitType');
+        const percentageInputs = document.getElementById('percentageInputs');
+        const memberPercentages = document.getElementById('memberPercentages');
+        const groupSelect = document.getElementById('groupSelect');
+        const expenseForm = document.getElementById('expenseForm');
+        const percentageError = document.getElementById('percentageError');
+
+        function updatePercentageInputs() {
+            if (splitType.value === 'PERCENTAGE') {
+                percentageInputs.style.display = 'block';
+                try {
+                    const membersData = groupSelect.selectedOptions[0].getAttribute('data-members');
+                    const members = JSON.parse(membersData);
+                    const defaultPercentage = (100 / members.length).toFixed(2);
+
+                    memberPercentages.innerHTML = `
+                        <p class="text-info mb-3">Enter percentage for each member (total must equal 100%)</p>
+                        <div class="row">
+                            ${members.map(member => `
+                                <div class="col-md-6 mb-3">
+                                    <label class="form-label">${member}</label>
+                                    <div class="input-group">
+                                        <input type="number"
+                                               name="percentage_${member}"
+                                               class="form-control percentage-input"
+                                               placeholder="Enter percentage"
+                                               min="0"
+                                               max="100"
+                                               step="0.01"
+                                               value="${defaultPercentage}"
+                                               oninput="validatePercentages()"
+                                               required>
+                                        <div class="input-group-append">
+                                            <span class="input-group-text">%</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                        <div class="mt-3 alert alert-info">
+                            <strong>Total: <span id="percentageTotal">${(defaultPercentage * members.length).toFixed(2)}</span>%</strong>
+                        </div>
+                    `;
+                    validatePercentages();
+                } catch (error) {
+                    console.error('Error parsing members:', error);
+                    memberPercentages.innerHTML = '<div class="alert alert-danger">Error loading members</div>';
+                }
+            } else {
+                percentageInputs.style.display = 'none';
+            }
+        }
+
+        function validatePercentages() {
+            const inputs = document.querySelectorAll('.percentage-input');
+            let total = 0;
+            inputs.forEach(input => {
+                const value = parseFloat(input.value || 0);
+                if (!isNaN(value)) {
+                    total += value;
+                }
+            });
+
+            total = Math.round(total * 100) / 100; // Round to 2 decimal places
+            document.getElementById('percentageTotal').textContent = total;
+
+            if (total !== 100) {
+                percentageError.textContent = `Total percentage must be 100%. Current total: ${total}%`;
+                return false;
+            } else {
+                percentageError.textContent = '';
+                return true;
+            }
+        }
+
+        splitType.addEventListener('change', updatePercentageInputs);
+        groupSelect.addEventListener('change', updatePercentageInputs);
+
+        expenseForm.addEventListener('submit', function(e) {
+            if (splitType.value === 'PERCENTAGE') {
+                const inputs = document.querySelectorAll('.percentage-input');
+                let total = 0;
+                inputs.forEach(input => {
+                    total += parseFloat(input.value || 0);
+                });
+
+                if (total !== 100) {
+                    e.preventDefault();
+                    percentageError.textContent = `Total percentage must be 100%. Current total: ${total}%`;
+                } else {
+                    percentageError.textContent = '';
+                }
+            }
+        });
+    </script>
+</body>
+</html>
+"""
+
+profile_template = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <title>User Profile</title>
+    <style>
+        :root {
+            --primary-color: #4361ee;
+            --secondary-color: #3f37c9;
+            --accent-color: #4895ef;
+            --bg-color: #f8f9fa;
+            --text-color: #2b2d42;
+            --card-bg: #ffffff;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: none;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+
+        .form-control {
+            border-radius: 10px;
+            padding: 0.8rem;
+            border: 1px solid #e0e0e0;
+            transition: all 0.3s ease;
+        }
+
+        .form-control:focus {
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 0.2rem rgba(67, 97, 238, 0.25);
+        }
+
+        .btn {
+            border-radius: 10px;
+            padding: 0.8rem 1.5rem;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+
+        .btn-primary {
+            background: var(--primary-color);
+            border: none;
+        }
+
+        .btn-primary:hover {
+            background: var(--secondary-color);
+            transform: translateY(-2px);
+        }
+
+        .btn-danger {
+            background: #ef233c;
+            border: none;
+        }
+
+        .btn-danger:hover {
+            background: #d90429;
+            transform: translateY(-2px);
+        }
+
+        .form-label {
+            font-weight: 500;
+            color: var(--text-color);
+            margin-bottom: 0.5rem;
+        }
+    </style>
+<body>
+    <div class="container mt-4">
+        <a href="/dashboard" class="btn btn-secondary mb-3"><i class="fas fa-arrow-left"></i> Back to Dashboard</a>
+        <h2 class="text-center">User Profile</h2>
+        <div class="card p-4 shadow-lg">
+            <form method="POST" action="/profile">
+                <div class="mb-3">
+                    <label class="form-label">Username</label>
+                    <input type="text" name="username" class="form-control" value="{{ username }}" readonly>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Email</label>
+                    <input type="email" name="email" class="form-control" value="{{ email }}" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Phone Number</label>
+                    <input type="tel" name="phone" class="form-control" value="{{ phone }}" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">UPI ID</label>
+                    <input type="text" name="upi_id" class="form-control" value="{{ upi_id }}"
+                           placeholder="e.g., username@bank" required>
+                    <div class="form-text">This UPI ID will be used to receive payments from others</div>
+                </div>
+                <button type="submit" class="btn btn-primary">Update Profile</button>
+            </form>
+            <div class="mt-4 text-center">
+                <a href="/logout" class="btn btn-danger">
+                    <i class="fas fa-sign-out-alt"></i> Sign Out
+                </a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+pending_bills_template = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <title>Pending Bills</title>
+</head>
+<body>
+    <div class="container mt-4">
+        <a href="/dashboard" class="btn btn-secondary mb-3"><i class="fas fa-arrow-left"></i> Back to Dashboard</a>
+        <h2 class="text-center">Pending Bills</h2>
+        <form method="POST" action="/update_bills">
+            <table class="table table-hover table-bordered">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Group</th>
+                        <th>Amount Due</th>
+                        <th>Paid By</th>
+                        <th>Owed By</th>
+                        <th>Status</th>
+                        {% if bills|selectattr('paid_by', 'equalto', session['username'])|list %}
+                        <th>Mark as Paid</th>
+                        {% endif %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for bill in bills %}
+                        <tr>
+                            <td>{{ bill.id }}</td>
+                            <td>{{ bill.group_name }}</td>
+                            <td>
+                                {{ format_amount(bill.amount_due, bill.currency) }}
+                                {% if bill.currency != 'INR' %}
+                                    ({{ format_amount(bill.amount_inr, 'INR') }})
+                                {% endif %}
+                            </td>
+                            <td>{{ bill.paid_by }}</td>
+                            <td>{{ bill.owed_by }}</td>
+                            <td>{{ 'Paid' if bill.is_paid else 'Pending' }}</td>
+                            {% if bill.paid_by == session['username'] and not bill.is_paid %}
+                            <td class="text-center">
+                                <input type="checkbox" name="paid_bills" value="{{ bill.id }}" class="form-check-input mx-auto">
+                            </td>
+                            {% elif bill.paid_by == session['username'] %}
+                            <td class="text-center">✓</td>
+                            {% endif %}
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% if bills|selectattr('paid_by', 'equalto', session['username'])|list %}
+            <button type="submit" class="btn btn-primary">Update Paid Status</button>
+            {% endif %}
+        </form>
+
+        <div class="mt-4">
+            <h3>Pay Using:</h3>
+            {% for bill in bills %}
+                {% if not bill.is_paid and bill.owed_by == session['username'] %}
+                    <div class="card mb-3">
+                        <div class="card-body">
+                            <h5>Bill #{{ bill.id }} - {{ format_amount(bill.amount_due, bill.currency) }}
+                                {% if bill.currency != 'INR' %}
+                                    ({{ format_amount(bill.amount_inr, 'INR') }})
+                                {% endif %}
+                            </h5>
+                            <div class="btn-group">
+                                <a href="/pay/{{ bill.id }}/upi" class="btn btn-success">
+                                    <i class="fas fa-mobile-alt"></i> Pay with UPI
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                {% endif %}
+            {% endfor %}
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+create_group_template = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+    <title>Create Group</title>
+    <style>
+        .member-search {
+            position: relative;
+        }
+        .search-results {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            z-index: 1000;
+            display: none;
+        }
+        .member-item {
+            padding: 8px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .member-item:hover {
+            background-color: #f8f9fa;
+        }
+        .selected-members {
+            margin-top: 10px;
+        }
+        .member-tag {
+            display: inline-block;
+            background: #e9ecef;
+            padding: 5px 10px;
+            border-radius: 15px;
+            margin: 2px;
+        }
+        .remove-member {
+            margin-left: 5px;
+            cursor: pointer;
+            color: #dc3545;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-4">
+        <a href="/dashboard" class="btn btn-secondary mb-3"><i class="fas fa-arrow-left"></i> Back to Dashboard</a>
+        <h2 class="text-center mb-4"><i class="fas fa-users"></i> Create New Group</h2>
+        <div class="card p-4 shadow-lg">
+            <form method="POST" action="/create_group" id="groupForm">
+                <div class="mb-4">
+                    <label class="form-label"><i class="fas fa-layer-group"></i> Group Name</label>
+                    <input type="text" name="group_name" class="form-control" required placeholder="Enter group name">
+                </div>
+                <div class="mb-4">
+                    <label class="form-label"><i class="fas fa-user-plus"></i> Add Members</label>
+                    <div class="member-search">
+                        <input type="text" id="memberSearch" class="form-control" placeholder="Search members...">
+                        <div class="search-results" id="searchResults"></div>
+                    </div>
+                    <div class="selected-members" id="selectedMembers"></div>
+                    <div id="hiddenMembers"></div>
+                </div>
+                <button type="submit" class="btn btn-primary btn-lg btn-block">
+                    <i class="fas fa-plus-circle"></i> Create Group
+                </button>
+            </form>
+        </div>
+    </div>
+    <script>
+        const users = {{ users_db.keys()|list|tojson }};
+        const currentUser = "{{ session['username'] }}";
+        const searchInput = document.getElementById('memberSearch');
+        const searchResults = document.getElementById('searchResults');
+        const selectedMembers = document.getElementById('selectedMembers');
+        const hiddenMembers= document.getElementById('hiddenMembers');
+        const selectedUsers = new Set();
+
+        searchInput.addEventListener('input', function() {
+            const searchTerm = this.value.toLowerCase();
+            const filteredUsers = users.filter(user =>
+                                user !== currentUser &&
+                user.toLowerCase().includes(searchTerm) &&
+                !selectedUsers.has(user)
+            );
+
+            searchResults.innerHTML = filteredUsers.map(user => `
+                <div class="member-item" onclick="addMember('${user}')">
+                    <i class="fas fa-user"></i> ${user}
+                </div>
+            `).join('');
+
+            searchResults.style.display = filteredUsers.length > 0 ? 'block' : 'none';
+        });
+
+        function addMember(username) {
+            selectedUsers.add(username);
+            updateSelectedMembers();
+            searchResults.style.display = 'none';
+            searchInput.value = '';
+        }
+
+        function removeMember(username) {
+            selectedUsers.delete(username);
+            updateSelectedMembers();
+        }
+
+        function updateSelectedMembers() {
+            selectedMembers.innerHTML = Array.from(selectedUsers).map(user => `
+                <span class="member-tag">
+                    <i class="fas fa-user"></i> ${user}
+                    <span class="remove-member" onclick="removeMember('${user}')">
+                        <i class="fas fa-times"></i>
+                    </span>
+                </span>
+            `).join('');
+
+            hiddenMembers.innerHTML = Array.from(selectedUsers).map(user => `
+                <input type="hidden" name="members" value="${user}">
+            `).join('');
+        }
+
+        document.addEventListener('click', function(e) {
+            if (!searchResults.contains(e.target) && e.target !== searchInput) {                searchResults.style.display = 'none';
+            }
+        });
+    </script>
+</body>
+</html>
+"""
+
+view_groups_template = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <title>View Groups</title>
+</head>
+<body>
+    <div class="container mt-4">
+        <a href="/dashboard" class="btn btn-secondary mb-3"><i class="fas fa-arrow-left"></i> Back to Dashboard</a>
+        <h2 class="text-center">Your Groups</h2>
+        <div class="row">
+            {% for group_name, members in user_groups.items() %}
+                <div class="col-md-6 mb-4">
+                    <div class="card shadow">
+                        <div class="card-header">
+                            <h3>{{ group_name }}</h3>
+                        </div>
+                        <div class="card-body">
+                            <h5>Members:</h5>
+                            <ul class="list-group mb-3">
+                                {% for member in members %}
+                                    <li class="list-group-item">{{ member }}</li>
+                                {% endfor %}
+                            </ul>
+                            <a href="/group/{{ group_name }}" class="btn btn-primary">View Expenses</a>
+                        </div>
+                    </div>
+                </div>
+            {% endfor %}
+        </div>
+        <a href="/create_group" class="btn btn-success mt-3">Create New Group</a>
+    </div>
+</body>
+</html>
+"""
+
+past_expenses_template = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <title>Past Expenses</title>
+</head>
+<body>
+    <div class="container mt-4">
+        <a href="/dashboard" class="btn btn-secondary mb-3"><i class="fas fa-arrow-left"></i> Back to Dashboard</a>
+        <h2 class="text-center">Past Expenses</h2>
+        <table class="table table-hover table-dark table-bordered">
+            <thead>
+                <tr>
+                    <th scope="col">#</th>
+                    <th scope="col">Expense Name</th>
+                    <th scope="col">Amount</th>
+                    <th scope="col">Participants</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for expense in past_expenses %}
+                    <tr>
+                        <td>{{ expense.id }}</td>
+                        <td>{{ expense.name }}</td>
+                        <td>₹{{ expense.amount }}</td>
+                        <td>{{ expense.participants }}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</body>
+</html>
+"""
+
+def format_amount(amount, currency):
+    if currency == 'INR':
+        return f'₹{amount:.2f}'
+    elif currency == 'USD':
+        return f'${amount:.2f}'
+    elif currency == 'EUR':
+        return f'€{amount:.2f}'
+    elif currency == 'GBP':
+        return f'£{amount:.2f}'
+    elif currency == 'JPY':
+        return f'¥{amount:.2f}'
+    else:
+        return f'{amount:.2f}'
+
+group_expenses_template = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{ group_name }} - Expenses</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+</head>
+<body>
+    <div class="container mt-4">
+        <h2>{{ group_name }}</h2>
+        <div class="card mb-4">
+            <div class="card-header">
+                <h4>Members</h4>
+            </div>
+            <div class="card-body">
+                <ul class="list-group">
+                {% for member in members %}
+                    <li class="list-group-item">{{ member }}</li>
+                {% endfor %}
+                </ul>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h4>Expenses</h4>
+            </div>
+            <div class="card-body">
+                <table class="table table-bordered">
+                    <thead>
+                        <tr>
+                            <th>Description</th>
+                            <th>Amount</th>
+                            <th>Paid By</th>
+                            <th>Category</th>
+                            <th>Date</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for expense in expenses %}
+                        <tr>
+                            <td>{{ expense.description }}</td>
+                            <td>
+                                {{ format_amount(expense.amount, expense.currency) }}
+                                {% if expense.currency != 'INR' %}
+                                    ({{ format_amount(expense.amount_inr, 'INR') }})
+                                {% endif %}
+                            </td>
+                            <td>{{ expense.paid_by }}</td>
+                            <td><span class="badge badge-info">{{ expense.category }}</span></td>
+                            <td>{{ expense.timestamp.strftime('%Y-%m-%d') }}</td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <a href="/add_expense" class="btn btn-primary mt-3">Add New Expense</a>
+        <a href="/view_groups" class="btn btn-secondary mt-3">Back to Groups</a>
+    </div>
+</body>
+</html>
+"""
+
+@app.route('/')
+def home():
+    return render_template_string(welcome_template)
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+
+        if username in users_db and check_password_hash(users_db[username]['password'], password):
+            session['username'] = username
+            return redirect(url_for('dashboard'))
+        return "Invalid username or password"
+    return render_template_string(login_template)
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        username = request.form['username']
+        email = request.form['email']
+        password = request.form['password']
+        upi_id = request.form['upi_id']
+
+        if username in users_db:
+            return "Username already exists"
+
+        hashed_password = generate_password_hash(password)
+        users_db[username] = {
+            'email': email,
+            'password': hashed_password,
+            'upi_id': upi_id
+        }
+        return redirect(url_for('login'))
+    return render_template_string(registration_template)
+
+@app.route('/logout')
+def logout():
+    session.pop('username', None)
+    return redirect(url_for('home'))
+
+@app.route('/dashboard')
+def dashboard():
+    return render_template_string(dashboard_template)
+
+# Store expenses, bills and groups in memory
+expenses_db = []
+bills_db = []
+groups_db = {}  # {group_name: [member_usernames]}
+
+@app.route('/scan_receipt', methods=['POST'])
+def scan_receipt():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+
+    if 'receipt' not in request.files:
+        return jsonify({'error': 'No receipt file uploaded'}), 400
+
+    receipt_file = request.files['receipt']
+    if receipt_file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+
+    try:
+        file_content = receipt_file.read()
+        mime = magic.Magic(mime=True)
+        file_type = mime.from_buffer(file_content)
+
+        if file_type == 'application/pdf':
+            # Convert PDF to image
+            pdf_bytes = io.BytesIO(file_content)
+            images = pdf2image.convert_from_bytes(pdf_bytes.read())
+            # Use first page
+            image = images[0]
+        else:
+            # Handle image files
+            image = Image.open(io.BytesIO(file_content))
+
+        # Perform OCR
+        text = pytesseract.image_to_string(image)
+
+        # Enhanced patterns for better extraction
+        date_patterns = [
+            # Date field with label (case-insensitive)
+            r'(?i)Date:\s*(\d{1,2}[-\s]*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-\s]*\d{4})',
+            r'(?i)Date:\s*(\d{1,2}[-\s]*(?:January|February|March|April|May|June|July|August|September|October|November|December)[a-z]*[-\s]*\d{4})',
+
+            # Date formats with explicit separators
+            r'(?i)(\d{1,2})[-/\s]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-/\s]+\d{4}',
+            r'(?i)(\d{1,2})[-/\s]+(?:January|February|March|April|May|June|July|August|September|October|November|December)[-/\s]+\d{4}',
+
+            # Date with dash/slash/dot separators
+            r'(\d{1,2})[-/\.]\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-/\.]\s*\d{4}',
+            r'(\d{1,2})[-/\.]\s*(?:January|February|March|April|May|June|July|August|September|October|November|December)[-/\.]\s*\d{4}',
+
+            # Standard numeric formats
+            r'\b(\d{1,2})[-/\.]\d{1,2}[-/\.]\d{4}\b',
+            r'\b\d{4}[-/\.]\d{1,2}[-/\.]\d{1,2}\b',
+
+            # Common receipt date formats
+            r'(?i)(?:date|dt|dated|invoice\s+date|bill\s+date|receipt\s+date):\s*(\d{1,2}[-/\s]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-/\s]+\d{4})',
+
+            # ISO format
+            r'\b\d{4}-\d{2}-\d{2}\b'
+        ]
+
+        # Extract amount
+        amount_patterns = [
+            # Priority 1: Total/Amount with currency and optional decimals
+            r'(?:total\s*amount|grand\s*total|net\s*total|final\s*total|sum\s*total|bill\s*total)[:\s]*(?:Rs\.?|INR|₹|\$|EUR|€|GBP|£)?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',
+
+            # Priority 2: Total at the end of receipt
+            r'(?:total|amount|sum|payable|due)[:\s]*(?:Rs\.?|INR|₹|\$|EUR|€|GBP|£)?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*$',
+
+            # Priority 3: Common receipt formats
+            r'(?:balance|net|final)[:\s]*(?:Rs\.?|INR|₹|\$|EUR|€|GBP|£)?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',
+            r'(?:Rs\.?|INR|₹|\$|EUR|€|GBP|£)\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*(?:total|due|payable)',
+
+            # Priority 4: Common receipt formats
+            r'(?:total|amount)[^a-zA-Z\d]*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',
+            r'(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)[^a-zA-Z\d]*(?:total|amount)',
+
+            # Priority 5: Last amount in the text
+            r'(?:Rs\.?|INR|₹|\$|EUR|€|GBP|£)\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',
+
+            # Priority 6: Last number that looks like a total
+            r'\b(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\b'
+        ]
+
+        # Sort text lines to prioritize bottom lines where total usually appears
+        lines = text.split('\n')
+        lines.reverse()
+        text = '\n'.join(lines)
+
+        # Extract amount
+        amount = None
+        for pattern in amount_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE)
+            for match in matches:
+                try:
+                    # Remove commas and convert to float
+                    amount_str = match.group(1).replace(',', '')
+                    amount = float(amount_str)
+                    # Take the largest amount found
+                    if amount > 0:
+                        break
+                except (ValueError, IndexError):
+                    continue
+            if amount and amount > 0:
+                break
+
+        # Check receipt validity
+        def is_valid_receipt(text, amount):
+            validation_checks = []
+
+            # Check if there's enough text content
+            if len(text.strip()) < 10:
+                return False, "Receipt text too short"
+
+            # Check if amount was found and is reasonable
+            if not amount:
+                return False, "No valid amount found"
+            if amount <= 0:
+                return False, "Invalid amount (must be greater than 0)"
+            if amount > 1000000:  # Arbitrary high limit
+                return False, "Amount seems unreasonably high"
+
+            # Check for date
+            date_found = any(
+                re.search(pattern, text, re.IGNORECASE)
+                for pattern in date_patterns
+            )
+            validation_checks.append(
+                ("Date found", date_found, "No date found on receipt")
+            )
+
+            # Check for common receipt keywords
+            receipt_keywords = [
+                'total', 'amount', 'payment', 'cash', 'receipt', 'bill',
+                'invoice', 'tax', 'subtotal', 'balance', 'paid', 'due'
+            ]
+            has_keywords = any(keyword in text.lower() for keyword in receipt_keywords)
+            validation_checks.append(
+                ("Receipt keywords", has_keywords, "Missing common receipt keywords")
+            )
+
+            # Check for merchant/business indicators
+            business_indicators = [
+                'store', 'shop', 'restaurant', 'cafe', 'hotel', 'ltd', 'inc',
+                'corporation', 'llc', 'co.', 'pvt', 'private', 'enterprise',
+                'mall', 'market', 'outlet', 'branch'
+            ]
+            has_business = any(indicator in text.lower() for indicator in business_indicators)
+            validation_checks.append(
+                ("Business identifier", has_business, "No business identifier found")
+            )
+
+            # Check for payment-related terms
+            payment_terms = ['cash', 'card', 'credit', 'debit', 'upi', 'paid', 'payment']
+            has_payment = any(term in text.lower() for term in payment_terms)
+            validation_checks.append(
+                ("Payment information", has_payment, "No payment information found")
+            )
+
+            # Calculate confidence score based on validation checks
+            passed_checks = sum(1 for check, passed, _ in validation_checks if passed)
+            confidence_score = (passed_checks / len(validation_checks)) * 100
+
+            # Receipt is considered valid if it passes at least 2 checks
+            is_valid = passed_checks >= 2
+
+            # Prepare detailed validation message
+            failed_checks = [msg for _, passed, msg in validation_checks if not passed]
+            validation_message = {
+                "valid": is_valid,
+                "confidence_score": confidence_score,
+                "failed_checks": failed_checks,
+                "message": "Valid receipt" if is_valid else "Invalid receipt: " + "; ".join(failed_checks)
+            }
+
+            return is_valid, validation_message
+
+        # Validate receipt
+        is_valid, validity_message = is_valid_receipt(text, amount)
+
+        # Extract merchant name (look for business identifiers)
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        merchant_patterns = [
+            r'(?:store|shop|restaurant|cafe|hotel):\s*([^\n]+)',
+            r'(?:business|merchant|vendor):\s*([^\n]+)',
+            r'(?:bill from|billed by):\s*([^\n]+)'
+        ]
+
+        merchant = None
+        # First try to find merchant using patterns
+        for pattern in merchant_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                merchant = match.group(1).strip()
+                break
+
+        # If no pattern match, use first non-empty line that's not a date or amount
+        if not merchant and lines:
+            for line in lines[:3]:
+                if not re.search(r'\d+[/-]\d+[/-]\d+', line) and not re.search(r'\d+\.\d{2}', line):
+                    merchant = line
+                    break
+
+        return jsonify({
+            'merchant': merchant,
+            'amount': amount,
+            'validation': validity_message,
+            'full_text': text
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/add_expense', methods=['GET', 'POST'])
+def add_expense():
+    if 'username' not in session:
+        return redirect(url_for('login'))
+
+    if request.method == 'POST':
+        amount = float(request.form['amount'])
+        currency = request.form.get('currency', 'INR')
+        group_name = request.form['group_name']
+        description = request.form['description']
+        split_type = request.form['split_type']
+
+        if group_name not in groups_db:
+            return "Group not found", 404
+
+        participants = groups_db[group_name]
+        expense_id = len(expenses_db) + 1
+        category = suggest_category(description)
+        amount_inr = amount * get_exchange_rate(currency)
+        expense = {
+            "id": expense_id,
+            "amount": amount,
+            "currency": currency,
+            "amount_inr": amount_inr,
+            "description": description,
+            "category": category,
+            "paid_by": session['username'],
+            "group_name": group_name,
+            "participants": participants,
+            "split_type": split_type,
+            "timestamp": datetime.now()
+        }
+        expenses_db.append(expense)
+
+        # Create bills for each participant based on split type
+        if split_type == "PERCENTAGE":
+            total_percentage = 0
+            participant_percentages = {}
+
+            # First calculate total percentage and store individual percentages
+            for participant in participants:
+                percentage = float(request.form.get(f'percentage_{participant}', 0))
+                participant_percentages[participant] = percentage
+                total_percentage += percentage
+
+            # Verify total is 100%
+            if total_percentage != 100:
+                return "Total percentage must equal 100%", 400
+
+            # Create bills based on percentages
+            for participant in participants:
+                if participant != session['username']:
+                    percentage = participant_percentages[participant]
+                    amount_due = (percentage / 100) * amount
+                    amount_inr = (percentage / 100) * amount_inr
+                    bill = {
+                        "id": len(bills_db) + 1,
+                        "expense_id": expense_id,
+                        "group_name": group_name,
+                        "description": description,
+                        "amount_due": amount_due,
+                        "currency": currency,
+                        "amount_inr": amount_inr,
+                        "paid_by": session['username'],
+                        "owed_by": participant,
+                        "is_paid": False
+                    }
+                    bills_db.append(bill)
+        else:
+            # Default equal split
+            amount_per_person_original = amount / len(participants)
+            amount_per_person_inr = amount_inr / len(participants)
+            for participant in participants:
+                if participant != session['username']:
+                    bill = {
+                        "id": len(bills_db) + 1,
+                        "expense_id": expense_id,
+                        "group_name": group_name,
+                        "description": description,
+                        "amount_due": amount_per_person_original,
+                        "currency": currency,
+                        "amount_inr": amount_per_person_inr,
+                        "paid_by": session['username'],
+                        "owed_by": participant,
+                        "is_paid": False
+                    }
+                    bills_db.append(bill)
+
+        return redirect(url_for('view_group', group_name=group_name))
+
+    return render_template_string(add_expense_template,
+                                    username=session['username'],
+                                    groups=groups_db)
+
+@app.route('/profile', methods=['GET', 'POST'])
+def profile():
+    if 'username' not in session:
+        return redirect(url_for('login'))
+
+    if request.method == 'POST':
+        email = request.form['email']
+        phone = request.form['phone']
+        upi_id = request.form['upi_id']
+        users_db[session['username']].update({
+            'email': email,
+            'phone': phone,
+            'upi_id': upi_id
+        })
+        return redirect(url_for('profile'))
+
+    user_data = users_db[session['username']]
+    return render_template_string(profile_template,
+                                    username=session['username'],
+                                    email=user_data.get('email', ''),
+                                    phone=user_data.get('phone', ''),
+                                    upi_id=user_data.get('upi_id', ''))
+
+@app.route('/past_expenses')
+def past_expenses():
+    if 'username' not in session:
+        return redirect(url_for('login'))
+    user_expenses = [exp for exp in expenses_db if session['username'] in exp['participants']]
+    return render_template_string(past_expenses_template, past_expenses=user_expenses)
+
+@app.route('/pending_bills')
+def pending_bills():
+    if 'username' not in session:
+        return redirect(url_for('login'))
+
+    # Get all unpaid bills
+    unpaid_bills = [bill for bill in bills_db if not bill['is_paid']]
+
+    # Create debt graph
+    debts = []
+    for bill in unpaid_bills:
+        debts.append((bill['owed_by'], bill['paid_by'], bill['amount_inr']))
+
+    # Optimize debts
+    optimized_debts = expenseManager.simplify_debts(debts)
+
+    # Convert optimized debts back to bills format
+    optimized_bills = []
+    for debtor, creditor, amount in optimized_debts:
+        # Find original group name from bills
+        original_bill = next(
+            (bill for bill in bills_db
+             if bill['paid_by'] == creditor and bill['owed_by'] == debtor),
+            None
+        )
+        group_name = original_bill['group_name'] if original_bill else 'Multiple Groups'
+
+        optimized_bills.append({
+            'id': f'opt_{len(optimized_bills)}',
+            'group_name': group_name,
+            'amount_due': amount,
+            'currency': 'INR',
+            'amount_inr': amount,
+            'paid_by': creditor,
+            'owed_by': debtor,
+            'is_paid': False,
+            'description': 'Settlement'
+        })
+
+    # Get user's relevant bills
+    relevant_bills = [
+        bill for bill in optimized_bills
+        if bill['paid_by'] == session['username'] or bill['owed_by'] == session['username']
+    ]
+
+    return render_template_string(pending_bills_template,
+                                bills=relevant_bills,
+                                format_amount=format_amount)
+
+import stripe
+
+# Configure payment details
+UPI_ID = "9527044426@ibl"
+
+@app.route('/update_bills', methods=['POST'])
+def update_bills():
+    if 'username' not in session:
+        return redirect(url_for('login'))
+
+    paid_bills = request.form.getlist('paid_bills')
+    for bill_id in paid_bills:
+        for bill in bills_db:
+            if str(bill['id']) == bill_id and bill['paid_by'] == session['username']:
+                bill['is_paid'] = True
+
+    return redirect(url_for('pending_bills'))
+
+@app.route('/pay/<bill_id>/upi', methods=['GET', 'POST'])
+def pay_with_upi(bill_id):
+    if 'username' not in session:
+        return redirect(url_for('login'))
+
+    # Handle both regular and optimized bills
+    if str(bill_id).startswith('opt_'):
+        # For optimized bills, search in bills_db to reconstruct the bill
+        opt_index = int(bill_id.split('_')[1])
+       
+        # Create debt graph
+        unpaid_bills = [bill for bill in bills_db if not bill['is_paid']]
+        debts = [(bill['owed_by'], bill['paid_by'], bill['amount_inr']) for bill in unpaid_bills]
+       
+        # Get optimized debts
+        optimized_debts = expenseManager.simplify_debts(debts)
+       
+        if opt_index >= len(optimized_debts):
+            return "Bill not found", 404
+           
+        debtor, creditor, amount = optimized_debts[opt_index]
+       
+        # Find original group name
+        original_bill = next(
+            (bill for bill in bills_db
+             if bill['paid_by'] == creditor and bill['owed_by'] == debtor),
+            None
+        )
+        group_name = original_bill['group_name'] if original_bill else 'Multiple Groups'
+       
+        bill = {
+            'id': bill_id,
+            'group_name': group_name,
+            'amount_due': amount,
+            'currency': 'INR',
+            'amount_inr': amount,
+            'paid_by': creditor,
+            'owed_by': debtor,
+            'is_paid': False,
+            'description': 'Settlement'
+        }
+    else:
+        # For regular bills
+        bill = next((b for b in bills_db if str(b['id']) == str(bill_id)), None)
+   
+    if not bill:
+        return "Bill not found", 404
+
+    # Only allow the person who owes money to make the payment
+    if bill['owed_by'] != session['username']:
+        return "You are not authorized to make this payment", 403
+
+    # Get the payer's UPI ID from their profile
+    payer_username = bill['paid_by']
+    payer_upi_id = users_db.get(payer_username, {}).get('upi_id')
+
+    if not payer_upi_id:
+        return "Payer's UPI ID not found. Please contact them to set up their UPI ID.", 400
+
+    try:
+        # Create UPI payment URL with payer's UPI ID
+        upi_params = {
+            'pa': payer_upi_id,  # payer's UPI ID
+            'pn': payer_username,  # payer's name
+            'am': str(bill['amount_inr']),  # amount
+            'cu': 'INR',  # currency
+            'tn': f"Payment for {bill['description']}"  # transaction note
+        }
+
+        upi_url = f"upi://pay?{urllib.parse.urlencode(upi_params)}"
+
+        # Generate QR code
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(upi_url)
+        qr.make(fit=True)
+
+        # Create QR code image
+        img = qr.make_image(fill_color="black", back_color="white")
+
+        # Convert QR code to base64
+        buffered = BytesIO()
+        img.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+
+        # Render UPI payment page with QR code
+        return render_template_string("""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>UPI Payment</title>
+                <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+                <style>
+                    .qr-container {
+                        text-align: center;
+                        margin: 20px 0;
+                    }
+                    .qr-code {
+                        max-width: 300px;
+                        margin: 0 auto;
+                    }
+                    .amount {
+                        font-size: 24px;
+                        font-weight: bold;
+                        margin: 20px 0;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container mt-5">
+                    <div class="card p-4">
+                        <h3 class="text-center">UPI Payment</h3>
+                        <div class="amount text-center">
+                            Amount: ₹{{ amount }}
+                        </div>
+                        <div class="qr-container">
+                            <img src="data:image/png;base64,{{ qr_code }}" class="qr-code" alt="UPI QR Code">
+                            <p class="mt-3">Scan this QR code with any UPI payment app to pay {{ payer_name }}</p>
+                        </div>
+                        <div class="text-center mt-4">
+                            <p>Pay to UPI ID: {{ upi_id }}</p>
+                            <p>Payee Name: {{ payer_name }}</p>
+                        </div>
+                        <div class="text-center mt-4">
+                            <a href="/pending_bills" class="btn btn-secondary">Back to Bills</a>
+                        </div>
+                    </div>
+                </div>
+            </body>
+            </html>
+        """, amount=bill['amount_inr'], qr_code=img_str, upi_id=payer_upi_id, payer_name=payer_username)
+
+    except Exception as e:
+        return str(e), 400
+
+@app.route('/create_group', methods=['GET', 'POST'])
+def create_group():
+    if 'username' not in session:
+        return redirect(url_for('login'))
+
+    if request.method == 'POST':
+        group_name = request.form['group_name']
+        members = request.form.getlist('members')
+        members.append(session['username'])  # Add creator to the group
+        groups_db[group_name] = list(set(members))  # Remove duplicates
+        return redirect(url_for('view_groups'))
+
+    return render_template_string(create_group_template, users_db=users_db)
+
+@app.route('/view_groups')
+def view_groups():
+    if 'username' not in session:
+        return redirect(url_for('login'))
+
+    user_groups = {
+        name: members
+        for name, members in groups_db.items()
+        if session['username'] in members
+    }
+    return render_template_string(view_groups_template, user_groups=user_groups)
+
+@app.route('/convert_currency/<from_currency>/<to_currency>/<amount>')
+def convert_currency(from_currency, to_currency, amount):
+    try:
+        response = requests.get(f'https://open.er-api.com/v6/latest/{from_currency}')
+        data = response.json()
+        if 'rates' not in data:
+            return jsonify({'error': 'Invalid response from exchange rate API'}), 400
+
+        rate = data['rates'].get(to_currency)
+        if not rate:
+            return jsonify({'error': f'Currency {to_currency} not found in rates'}), 400
+
+        converted_amount = float(amount) * rate
+        return jsonify({
+            'result': converted_amount,
+            'rate': rate,
+            'from': from_currency,
+            'to': to_currency
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/group/<group_name>')
+def view_group(group_name):
+    if 'username' not in session:
+        return redirect(url_for('login'))
+
+    if group_name not in groups_db:
+        return "Group not found", 404
+
+    group_expenses = [
+        exp for exp in expenses_db
+        if exp.get('group_name') == group_name
+    ]
+
+    return render_template_string(group_expenses_template,
+                                    group_name=group_name,
+                                    expenses=group_expenses,
+                                    members=groups_db[group_name],
+                                    format_amount=format_amount)
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=3000, debug=True)
